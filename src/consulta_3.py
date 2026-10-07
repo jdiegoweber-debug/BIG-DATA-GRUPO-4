@@ -44,21 +44,34 @@ def ejecutar_pandas(path):
     print(f"--- PRIMEROS 10 ACCIDENTES MÁS CERCANOS ENCONTRADOS (PANDAS) ---")
     print(top_10.to_string(index=False))
     print(f"Total accidentes en el radio: {len(resultados)}")
-    print(f"⏱️ Tiempo Pandas: {t:.4f} segundos")
+    print(f"⏱️ Tiempo Total Pandas: {t:.4f} segundos")
     return t
 
 def ejecutar_pyspark(path):
-    print(f"\n🚀 [PYSPARK] Ejecutando Consulta 3 (Haversine R={RADIO_R} km)...")
-    start_time = time.time()
+    print(f"\n🚀 [PYSPARK] Iniciando entorno de Spark...")
+    start_spark_init = time.time()
     
-    spark = SparkSession.builder.appName("C3").master("local[*]").config("spark.driver.memory", "4g").getOrCreate()
-    df = spark.read.parquet(path)
+    # --- MEDICIÓN: Levantamiento de Spark ---
+    spark = SparkSession.builder \
+        .appName("C3") \
+        .master("local[*]") \
+        .config("spark.driver.memory", "4g") \
+        .getOrCreate()
+    
+    t_init = time.time() - start_spark_init
+    print(f"⏱️ Tiempo de inicialización (Levantar Spark): {t_init:.4f} segundos")
+    
+    # --- MEDICIÓN: Proceso Real ---
+    print(f"\n🔄 Procesando datos distribuidos con PySpark...")
+    start_process = time.time()
+    
+    # Optimización: seleccionamos solo columnas necesarias inmediatamente
+    df = spark.read.parquet(path).select("Start_Lat", "Start_Lng", "Severity")
     
     # 1. Filtrar nulos iniciales
     df_valid = df.filter(F.col("Start_Lat").isNotNull() & F.col("Start_Lng").isNotNull())
     
     # 2. Aplicar Haversine nativo mediante funciones matemáticas distribuidas de Spark
-    # Convertimos grados a radianes usando F.radians()
     df_dist = df_valid.withColumn("dlat", F.radians(F.lit(LAT0)) - F.radians(F.col("Start_Lat"))) \
                       .withColumn("dlng", F.radians(F.lit(LNG0)) - F.radians(F.col("Start_Lng"))) \
                       .withColumn("a", F.sin(F.col("dlat") / 2)**2 + 
@@ -66,7 +79,7 @@ def ejecutar_pyspark(path):
                       .withColumn("c", 2 * F.asin(F.sqrt(F.col("a")))) \
                       .withColumn("Distancia_KM", F.lit(RADIO_TIERRA) * F.col("c"))
     
-    # 3. Filtrar por radio, seleccionar columnas, ordenar y aplicar acción terminal
+    # 3. Filtrar por radio, ordenar y aplicar acción terminal
     df_final = df_dist.filter(F.col("Distancia_KM") <= RADIO_R) \
                       .select("Start_Lat", "Start_Lng", "Severity", "Distancia_KM") \
                       .orderBy("Distancia_KM")
@@ -74,18 +87,36 @@ def ejecutar_pyspark(path):
     resultados = df_final.limit(10).collect()
     total_count = df_final.count()  # Forzamos conteo global para el benchmark
     
-    t = time.time() - start_time
+    t_process = time.time() - start_process
+    t_total = t_init + t_process
+    
     print(f"\n--- PRIMEROS 10 ACCIDENTES MÁS CERCANOS ENCONTRADOS (PYSPARK) ---")
     for r in resultados:
         print(f"Lat: {r['Start_Lat']} | Lng: {r['Start_Lng']} | Severidad: {r['Severity']} | Distancia: {r['Distancia_KM']:.2f} km")
         
     print(f"Total accidentes en el radio: {total_count}")
-    print(f"⏱️ Tiempo PySpark: {t:.4f} segundos")
+    print(f"⏱️ Tiempo Real de Proceso PySpark: {t_process:.4f} segundos")
+    print(f"⏱️ Tiempo Total Acumulado PySpark: {t_total:.4f} segundos")
+    
     spark.stop()
-    return t
+    return t_process, t_total
 
 if __name__ == "__main__":
-    p = os.path.join("data", "raw", "us_accidents.parquet")
-    t_p = ejecutar_pandas(p)
-    t_s = ejecutar_pyspark(p)
-    print(f"\n📈 SPEEDUP CONSULTA 3: {t_p / t_s:.2f}x")
+    # Obtener de forma segura el directorio base del proyecto 'mia_bigdata_project'
+    # Si se ejecuta desde 'src', sube un nivel; si se ejecuta desde la raíz, se queda ahí
+    script_dir = os.path.dirname(os.path.abspath(__file__))
+    if os.path.basename(script_dir) == "src":
+        BASE_DIR = os.path.dirname(script_dir)
+    else:
+        BASE_DIR = script_dir
+        
+    p = os.path.join(BASE_DIR, "data", "raw", "us_accidents.parquet")
+    
+    # Ejecuciones
+    t_pandas = ejecutar_pandas(p)
+    t_spark_proc, t_spark_total = ejecutar_pyspark(p)
+    
+    # Comparativas de velocidad (Speedup)
+    print(f"\n📊 --- CONCLUSIONES DEL BENCHMARK ---")
+    print(f"📈 SPEEDUP REAL (Solo cómputo): {t_pandas / t_spark_proc:.2f}x más rápido con PySpark")
+    print(f"📉 SPEEDUP GLOBAL (Incluyendo sobrecosto de levantar Spark): {t_pandas / t_spark_total:.2f}x")
