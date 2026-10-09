@@ -1,1 +1,6 @@
 data/
+*.bak*
+*.bak_v*
+__pycache__/
+*.pyc
+.ipynb_checkpoints/
